@@ -55,6 +55,8 @@
 #include "tui/tui.h"		/* For tui_active et al.   */
 #endif
 
+void x_command_for_pci (char *exp, int from_tty, CORE_ADDR base);
+
 struct format_data
   {
     int count;
@@ -790,7 +792,8 @@ print_address_demangle (const struct value_print_options *opts,
    Fetch it from memory and print on gdb_stdout.  */
 
 static void
-do_examine (struct format_data fmt, struct gdbarch *gdbarch, CORE_ADDR addr)
+do_examine (struct format_data fmt, struct gdbarch *gdbarch, CORE_ADDR addr,
+		CORE_ADDR base)
 {
   char format = 0;
   char size;
@@ -804,7 +807,7 @@ do_examine (struct format_data fmt, struct gdbarch *gdbarch, CORE_ADDR addr)
   size = fmt.size;
   count = fmt.count;
   next_gdbarch = gdbarch;
-  next_address = addr;
+  next_address = addr + base;
 
   /* Instruction format implies fetch single bytes
      regardless of the specified size.
@@ -878,6 +881,11 @@ do_examine (struct format_data fmt, struct gdbarch *gdbarch, CORE_ADDR addr)
       if (format == 'i')
 	fputs_filtered (pc_prefix (next_address), gdb_stdout);
       print_address (next_gdbarch, next_address, gdb_stdout);
+      if(base)
+      	fprintf_filtered(gdb_stdout, "0x%lx", next_address - base);
+      else
+	print_address (next_gdbarch, next_address, gdb_stdout);
+
       printf_filtered (":");
       for (i = maxelts;
 	   i > 0 && count > 0;
@@ -1406,7 +1414,7 @@ address_info (char *exp, int from_tty)
 
 
 static void
-x_command (char *exp, int from_tty)
+x_command_impl (char *exp, int from_tty, CORE_ADDR base)
 {
   struct expression *expr;
   struct format_data fmt;
@@ -1454,7 +1462,7 @@ x_command (char *exp, int from_tty)
   if (!next_gdbarch)
     error_no_arg (_("starting display address"));
 
-  do_examine (fmt, next_gdbarch, next_address);
+  do_examine (fmt, next_gdbarch, next_address, base);
 
   /* If the examine succeeds, we remember its size and format for next
      time.  Set last_size to 'b' for strings.  */
@@ -1484,6 +1492,18 @@ x_command (char *exp, int from_tty)
       else
 	set_internalvar (lookup_internalvar ("__"), last_examine_value);
     }
+}
+
+static void
+x_command (char *exp, int from_tty)
+{
+  x_command_impl(exp, from_tty, 0);
+}
+
+void
+x_command_for_pci (char *exp, int from_tty, CORE_ADDR base)
+{
+  x_command_impl(exp, from_tty, base);
 }
 
 
@@ -1762,7 +1782,7 @@ do_one_display (struct display *d)
 	  addr = value_as_address (val);
 	  if (d->format.format == 'i')
 	    addr = gdbarch_addr_bits_remove (d->exp->gdbarch, addr);
-	  do_examine (d->format, d->exp->gdbarch, addr);
+	  do_examine (d->format, d->exp->gdbarch, addr, 0);
 	}
       if (ex.reason < 0)
 	fprintf_filtered (gdb_stdout, _("<error: %s>\n"), ex.message);

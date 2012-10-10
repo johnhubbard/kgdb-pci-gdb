@@ -85,6 +85,10 @@ extern struct cmd_list_element *maintenancelist;
 
 extern struct cmd_list_element *maintenanceinfolist;
 
+/* Chain containing all defined pci subcommands. */
+
+extern struct cmd_list_element *pcicmdlist;
+
 /* Chain containing all defined "maintenance print" subcommands.  */
 
 extern struct cmd_list_element *maintenanceprintlist;

@@ -39,6 +39,7 @@
 #include "gdb_assert.h"
 #include "observer.h"
 #include "solib.h"
+#include "cli/cli-cmds.h"
 #include "cli/cli-decode.h"
 #include "cli/cli-setshow.h"
 #include "target-descriptions.h"
@@ -67,6 +68,8 @@
 #include "ax.h"
 #include "ax-gdb.h"
 #include "agent.h"
+
+void x_command_for_pci (char *exp, int from_tty, CORE_ADDR base);
 
 /* Temp hacks for tracepoint encoding migration.  */
 static char *target_buf;
@@ -8930,6 +8933,373 @@ packet_command (char *args, int from_tty)
   puts_filtered ("\n");
 }
 
+/*
+
+  LOCAL FUNCTION
+
+  pci_command -- access the PCI subcommands
+
+  SYNOPSIS
+
+  void pci_command (char *args, int from_tty)
+
+  Created by John F. Hubbard, January, 2009
+  jhubbard@nvidia.com
+
+*/
+
+static void
+pci_command (char *args, int from_tty)
+{
+  printf_unfiltered (_("\"pci\" must be followed by the name of a pci command.\n"));
+  help_list (pcicmdlist, "pci ", -1, gdb_stdout);
+}
+
+static void
+pci_command_ls(char *args, int from_tty)
+{
+  char buf[1024];
+  struct remote_state *rs = get_remote_state ();
+
+  if (!remote_desc)
+    error (_("command can only be used with remote target"));
+
+  memset(buf, 0, sizeof(buf));
+
+  strcpy(buf, "qPCI-ls");
+  putpkt (buf);
+
+  getpkt (&rs->buf, &rs->buf_size, 0);
+  puts_filtered (rs->buf);
+  puts_filtered ("\n");
+}
+
+struct kgdb_pci_state
+{
+  unsigned short bus_num;
+  CORE_ADDR bar0_vaddr;
+  CORE_ADDR bar1_vaddr;
+  CORE_ADDR bar2_vaddr;
+  CORE_ADDR bar3_vaddr;
+  CORE_ADDR bar4_vaddr;
+  CORE_ADDR bar5_vaddr;
+};
+
+static struct kgdb_pci_state kgdb_pci_local_state =
+{ 0xffff, 0, 0 };
+
+static void pci_lookup_bar_vaddr(struct remote_state *rs,
+				 char * bar_string,
+				 CORE_ADDR * pbar_vaddr)
+{
+  char buf[1024];
+  char * p;
+  char bar;
+
+  memset(buf, 0, sizeof(buf));
+  sprintf(buf, "qPCI-get%x", kgdb_pci_local_state.bus_num);
+  putpkt (buf);
+  getpkt (&rs->buf, &rs->buf_size, 0);
+
+  p = strstr(rs->buf, bar_string);
+
+  if (p)
+  {
+    p += strlen("bar[n]:");
+    *pbar_vaddr = strtoulst(p, 0, 0);
+  }
+  else
+  {
+    *pbar_vaddr = 0;
+  }
+}
+
+static void pci_read_config_impl(struct remote_state *rs, int offset,
+				 int num_dwords)
+{
+  char buf[1024];
+
+  memset(buf, 0, sizeof(buf));
+  sprintf(buf, "qPCI-read-config%x,%x,%x",
+	  kgdb_pci_local_state.bus_num, offset, num_dwords);
+  putpkt (buf);
+  getpkt (&rs->buf, &rs->buf_size, 0);
+  puts_filtered (rs->buf);
+  puts_filtered ("\n");
+}
+
+static void pci_write_config_impl(struct remote_state *rs,
+																	int offset, unsigned value)
+{
+  char buf[1024];
+
+  memset(buf, 0, sizeof(buf));
+  sprintf(buf, "qPCI-write-config%x,%x,%x",
+	  kgdb_pci_local_state.bus_num, offset, value);
+  putpkt (buf);
+  getpkt (&rs->buf, &rs->buf_size, 0);
+  puts_filtered (rs->buf);
+  puts_filtered ("\n");
+}
+
+static void
+pci_command_read_config(char *args, int from_tty)
+{
+  struct remote_state *rs = get_remote_state ();
+	unsigned offset = 0;
+	unsigned num_dwords = 0;
+	char * p;
+
+  if (!remote_desc)
+    error (_("command can only be used with remote target"));
+
+  if (!args || 0 == strlen(args))
+  {
+    error(_("Missing argument(s). "
+	    "Format: pci read-config <offset> [,<num_dwords>]"));
+  }
+
+  offset = strtoulst(args, 0, 0);
+
+  p = strstr(args, ",");
+  if (p)
+  {
+    num_dwords = strtoulst(p + 1, 0, 0);
+  }
+  else
+  {
+    num_dwords = 1;
+  }
+
+  pci_read_config_impl(rs, offset, num_dwords);
+}
+
+static void
+pci_command_write_config(char *args, int from_tty)
+{
+  struct remote_state *rs = get_remote_state ();
+	unsigned offset = 0;
+	unsigned value = 0;
+	char * p;
+
+  if (!remote_desc)
+    error (_("command can only be used with remote target"));
+
+  if (!args || 0 == strlen(args))
+  {
+    error(_("Missing argument(s). "
+	    "Format: pci write-config <offset> = <new_value>"));
+  }
+
+  offset = strtoulst(args, 0, 0);
+  p = strstr(args, "=");
+  if (p)
+  {
+    value = strtoulst(p + 1, 0, 0);
+		pci_write_config_impl(rs, offset, value);
+  }
+  else
+  {
+    printf("Missing the new value (pci write-config <offset> = <new value>\n");
+  }
+}
+
+static void pci_print_if_not_zero(int bar, CORE_ADDR bar_vaddr)
+{
+  if (bar_vaddr)
+  {
+    printf_filtered ("\tbar%d: 0x%lx\n", bar, bar_vaddr);
+  }
+}
+
+static void pci_command_show_impl()
+{
+  printf_filtered ("Using PCI device at bus 0x%x, target virtual "
+                   "addresses are: \n",
+		   kgdb_pci_local_state.bus_num);
+
+  pci_print_if_not_zero(0, kgdb_pci_local_state.bar0_vaddr);
+  pci_print_if_not_zero(1, kgdb_pci_local_state.bar1_vaddr);
+  pci_print_if_not_zero(2, kgdb_pci_local_state.bar2_vaddr);
+  pci_print_if_not_zero(3, kgdb_pci_local_state.bar3_vaddr);
+  pci_print_if_not_zero(4, kgdb_pci_local_state.bar4_vaddr);
+  pci_print_if_not_zero(5, kgdb_pci_local_state.bar5_vaddr);
+}
+
+static void
+pci_command_use(char *args, int from_tty)
+{
+  struct remote_state *rs = get_remote_state ();
+
+  if (!remote_desc)
+    error (_("command can only be used with remote target"));
+
+  kgdb_pci_local_state.bus_num = strtoul(args, 0, 0);
+
+	/* Lookup virtual addresses: */
+  pci_lookup_bar_vaddr(rs, "bar[0]:", &kgdb_pci_local_state.bar0_vaddr);
+  pci_lookup_bar_vaddr(rs, "bar[1]:", &kgdb_pci_local_state.bar1_vaddr);
+  pci_lookup_bar_vaddr(rs, "bar[2]:", &kgdb_pci_local_state.bar2_vaddr);
+  pci_lookup_bar_vaddr(rs, "bar[3]:", &kgdb_pci_local_state.bar3_vaddr);
+  pci_lookup_bar_vaddr(rs, "bar[4]:", &kgdb_pci_local_state.bar4_vaddr);
+  pci_lookup_bar_vaddr(rs, "bar[5]:", &kgdb_pci_local_state.bar5_vaddr);
+
+  pci_command_show_impl();
+}
+
+static void
+pci_command_show(char *args, int from_tty)
+{
+  struct remote_state *rs = get_remote_state ();
+
+  if (!remote_desc)
+    error (_("command can only be used with remote target"));
+
+  pci_command_show_impl();
+}
+
+static void
+pci_command_read_barN(char *args, int from_tty, CORE_ADDR bar_vaddr)
+{
+  char buf[1024];
+  struct remote_state *rs = get_remote_state ();
+
+  if (!remote_desc)
+    error (_("command can only be used with remote target"));
+
+  memset(buf, 0, sizeof(buf));
+
+  if (bar_vaddr)
+  {
+    x_command_for_pci(args, from_tty, bar_vaddr);
+  }
+  else
+  {
+    error (_("that BAR is not mapped (did you forget to run \"pci use\"?"));
+  }
+}
+
+static void
+pci_command_write_barN(char *args, int from_tty, CORE_ADDR bar_vaddr, int bar)
+{
+  char buf[1024];
+  char * p;
+  unsigned int value = 0;
+  CORE_ADDR offset = 0;
+
+  struct remote_state *rs = get_remote_state ();
+
+  if (!remote_desc)
+    error (_("command can only be used with remote target"));
+
+  p = args;
+  if (p)
+  {
+    offset = strtoulst(p, 0, 0);
+  }
+
+  p = strstr(args, "=");
+  if (p)
+  {
+    value = strtoulst(p + 1, 0, 0);
+  }
+
+  printf_filtered("Writing 0x%x (%ld bytes) to BAR%d + 0x%lx\n",
+                  value, sizeof(value), bar, offset);
+
+	if (bar_vaddr)
+  {
+    int pos;
+    memset(buf, 0, sizeof(buf));
+    pos = sprintf(buf, "M%s,%s:%s",
+    int_string(bar_vaddr + offset, 16, 0, 0, 0),
+    int_string(sizeof(value),      16, 0, 0, 0),
+    int_string(value,              16, 0, sizeof(value)*2, 0));
+
+    putpkt (buf);
+    getpkt (&rs->buf, &rs->buf_size, 0);
+    puts_filtered (rs->buf);
+    puts_filtered ("\n");
+  }
+  else
+  {
+    error (_("that BAR is not mapped (did you forget to run \"pci use\"?"));
+  }
+}
+
+static void
+pci_command_read_bar0(char *args, int from_tty)
+{
+  pci_command_read_barN(args, from_tty, kgdb_pci_local_state.bar0_vaddr);
+}
+
+static void
+pci_command_read_bar1(char *args, int from_tty)
+{
+  pci_command_read_barN(args, from_tty, kgdb_pci_local_state.bar1_vaddr);
+}
+
+static void
+pci_command_read_bar2(char *args, int from_tty)
+{
+  pci_command_read_barN(args, from_tty, kgdb_pci_local_state.bar2_vaddr);
+}
+
+static void
+pci_command_read_bar3(char *args, int from_tty)
+{
+  pci_command_read_barN(args, from_tty, kgdb_pci_local_state.bar3_vaddr);
+}
+
+static void
+pci_command_read_bar4(char *args, int from_tty)
+{
+  pci_command_read_barN(args, from_tty, kgdb_pci_local_state.bar4_vaddr);
+}
+
+static void
+pci_command_read_bar5(char *args, int from_tty)
+{
+  pci_command_read_barN(args, from_tty, kgdb_pci_local_state.bar5_vaddr);
+}
+
+static void
+pci_command_write_bar0(char *args, int from_tty)
+{
+  pci_command_write_barN(args, from_tty, kgdb_pci_local_state.bar0_vaddr, 0);
+}
+
+static void
+pci_command_write_bar1(char *args, int from_tty)
+{
+  pci_command_write_barN(args, from_tty, kgdb_pci_local_state.bar1_vaddr, 1);
+}
+
+static void
+pci_command_write_bar2(char *args, int from_tty)
+{
+  pci_command_write_barN(args, from_tty, kgdb_pci_local_state.bar2_vaddr, 2);
+}
+
+static void
+pci_command_write_bar3(char *args, int from_tty)
+{
+  pci_command_write_barN(args, from_tty, kgdb_pci_local_state.bar3_vaddr, 3);
+}
+
+static void
+pci_command_write_bar4(char *args, int from_tty)
+{
+  pci_command_write_barN(args, from_tty, kgdb_pci_local_state.bar4_vaddr, 4);
+}
+
+static void
+pci_command_write_bar5(char *args, int from_tty)
+{
+  pci_command_write_barN(args, from_tty, kgdb_pci_local_state.bar5_vaddr, 5);
+}
+
+
 #if 0
 /* --------- UNIT_TEST for THREAD oriented PACKETS ------------------- */
 
@@ -11373,6 +11743,118 @@ this command sends the string TEXT to the inferior, and displays the\n\
 response packet.  GDB supplies the initial `$' character, and the\n\
 terminating `#' character and checksum."),
 	   &maintenancelist);
+
+  add_prefix_cmd ("pci", class_obscure, pci_command, _("\
+Send a PCI command to a remote target.\n\
+  pci <sub-command> <parameters>\n"),
+		  &pcicmdlist, "pci ",
+		  0 /* allow-unknown */, &cmdlist);
+
+	add_cmd ("ls", class_obscure, pci_command_ls,	_("\
+List remote target's PCI devices\n\
+Only those devices that	have virtual memory mapped, via the kgdbpci \
+kernel boot parameter, will be shown.\n\
+  pci ls\n"),
+		&pcicmdlist);
+
+	add_cmd ("use", class_obscure, pci_command_use,	_("\
+Tell gdb to use the following device for future pci commands.\n\
+This sets up the base virtual addresses (similar to nvwatch init).\n\
+	pci use <bus_num>\n"),
+		&pcicmdlist);
+
+	add_cmd ("show", class_obscure, pci_command_show,	_("\
+Report which PCI device GDB is using for pci commands.\n\
+This shows the result of a previous \"pci use\" command.\n\
+	pci show\n"),
+		&pcicmdlist);
+
+	add_cmd ("rbar0", class_obscure, pci_command_read_bar0,	_("\
+Read from BAR0 of the in-use PCI device, using MMIO.\n\
+This uses the same format as the x/FMT command.\n\
+(You can get nearly the same effect by running x/FMT <your_address+barN_address> ).\n\
+  pci rbar0 <offset>\n"),
+		&pcicmdlist);
+
+	add_cmd ("rbar1", class_obscure, pci_command_read_bar1,	_("\
+Read from BAR1 of the in-use PCI device, using MMIO.\n\
+This uses the same format as the x/FMT command.\n\
+(You can get nearly the same effect by running x/FMT <your_address+barN_address> ).\n\
+x/FMT <your_address+barN_address>.\n\
+  pci rbar1 <offset>\n"),
+		&pcicmdlist);
+
+	add_cmd ("rbar2", class_obscure, pci_command_read_bar2,	_("\
+Read from BAR2 of the in-use PCI device, using MMIO.\n\
+This uses the same format as the x/FMT command.\n\
+(You can get nearly the same effect by running x/FMT <your_address+barN_address> ).\n\
+x/FMT <your_address+barN_address>.\n\
+  pci rbar2 <offset>\n"),
+		&pcicmdlist);
+
+	add_cmd ("rbar3", class_obscure, pci_command_read_bar3,	_("\
+Read from BAR3 of the in-use PCI device, using MMIO.\n\
+This uses the same format as the x/FMT command.\n\
+(You can get nearly the same effect by running x/FMT <your_address+barN_address> ).\n\
+x/FMT <your_address+barN_address>.\n\
+  pci rbar3 <offset>\n"),
+		&pcicmdlist);
+
+	add_cmd ("rbar4", class_obscure, pci_command_read_bar4,	_("\
+Read from BAR4 of the in-use PCI device, using MMIO.\n\
+This uses the same format as the x/FMT command.\n\
+(You can get nearly the same effect by running x/FMT <your_address+barN_address> ).\n\
+x/FMT <your_address+barN_address>.\n\
+  pci rbar4 <offset>\n"),
+		&pcicmdlist);
+
+	add_cmd ("rbar5", class_obscure, pci_command_read_bar5,	_("\
+Read from BAR5 of the in-use PCI device, using MMIO.\n\
+This uses the same format as the x/FMT command.\n\
+(You can get nearly the same effect by running x/FMT <your_address+barN_address> ).\n\
+x/FMT <your_address+barN_address>.\n\
+  pci rbar5 <offset>\n"),
+		&pcicmdlist);
+
+	add_cmd ("wbar0", class_obscure, pci_command_write_bar0,	_("\
+Write to BAR0 of the in-use PCI device, using MMIO.\n\
+  pci wbar0 <offset> = <new_value>\n"),
+		&pcicmdlist);
+
+	add_cmd ("wbar1", class_obscure, pci_command_write_bar1,	_("\
+Write to BAR1 of the in-use PCI device, using MMIO.\n\
+  pci wbar1 <offset> = <new_value>\n"),
+		&pcicmdlist);
+
+	add_cmd ("wbar2", class_obscure, pci_command_write_bar2,	_("\
+Write to BAR2 of the in-use PCI device, using MMIO.\n\
+  pci wbar2 <offset> = <new_value>\n"),
+		&pcicmdlist);
+
+	add_cmd ("wbar3", class_obscure, pci_command_write_bar3,	_("\
+Write to BAR3 of the in-use PCI device, using MMIO.\n\
+  pci wbar3 <offset> = <new_value>\n"),
+		&pcicmdlist);
+
+	add_cmd ("wbar4", class_obscure, pci_command_write_bar4,	_("\
+Write to BAR4 of the in-use PCI device, using MMIO.\n\
+  pci wbar4 <offset> = <new_value>\n"),
+		&pcicmdlist);
+
+	add_cmd ("wbar5", class_obscure, pci_command_write_bar5,	_("\
+Write to BAR5 of the in-use PCI device, using MMIO.\n\
+  pci wbar5 <offset> = <new_value>\n"),
+		&pcicmdlist);
+
+	add_cmd ("read-config", class_obscure, pci_command_read_config,	_("\
+Read from PCI configuration space, using configuration cycles (not MMIO).\n\
+  pci read-config <offset> [,<num_dwords>]\n"),
+		&pcicmdlist);
+
+	add_cmd ("write-config", class_obscure, pci_command_write_config,	_("\
+Write a new 32-bit value to PCI configuration space, using configuration cycles (not MMIO).\n\
+	pci write-config <offset> = <new_value>\n"),
+		&pcicmdlist);
 
   add_setshow_boolean_cmd ("remotebreak", no_class, &remote_break, _("\
 Set whether to send break if interrupted."), _("\

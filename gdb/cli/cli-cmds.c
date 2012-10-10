@@ -168,6 +168,10 @@ struct cmd_list_element *maintenancelist;
 
 struct cmd_list_element *maintenanceinfolist;
 
+/* Chain containing all defined pci subcommands. */
+
+struct cmd_list_element *pcicmdlist;
+
 /* Chain containing all defined "maintenance print" subcommands.  */
 
 struct cmd_list_element *maintenanceprintlist;
@@ -1577,6 +1581,7 @@ init_cmd_lists (void)
   sethistlist = NULL;
   showhistlist = NULL;
   unsethistlist = NULL;
+  pcicmdlist= NULL;
   maintenancelist = NULL;
   maintenanceinfolist = NULL;
   maintenanceprintlist = NULL;
